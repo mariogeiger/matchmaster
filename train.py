@@ -76,14 +76,14 @@ class PlayPolicy(nn.Module):
 
         self.fc_in = nn.Sequential(
             linear(in_features, hidden_features), nn.ReLU(),
-            #linear(hidden_features, hidden_features), nn.ReLU(),
+            linear(hidden_features, hidden_features), nn.ReLU(),
         )
         
         self.lstm = nn.LSTM(hidden_features, hidden_features)
         
         self.fc_out = nn.Sequential(
             nn.ReLU(),
-            #linear(hidden_features, hidden_features), nn.ReLU(),
+            linear(hidden_features, hidden_features), nn.ReLU(),
             linear(hidden_features, out_features), 
             nn.LogSoftmax(dim=1)
         )
