@@ -1,8 +1,11 @@
-# pylint: disable=E1101
+# pylint: disable=C,E1101,W0221
 import torch
 import torch.nn as nn
 import random
 import itertools
+import argparse
+import os
+import shutil
 
 
 def allowed_moves(table, hand):
@@ -23,11 +26,9 @@ def allowed_moves(table, hand):
 
             if len(better_trumps) > 0:
                 return better_trumps
-            else:
-                return trumps
+            return trumps
         return trumps
-    else:
-        return hand
+    return hand
 
 
 def winner(table):
@@ -64,38 +65,10 @@ def orthogonal_(tensor, gain=1):
 
 
 def linear(in_features, out_features, bias=True):
-    m = nn.Linear(in_features, out_features, bias=True)
+    m = nn.Linear(in_features, out_features, bias=bias)
     orthogonal_(m.weight)
     nn.init.zeros_(m.bias)
     return m
-
-
-class PlayPolicy(nn.Module):
-    def __init__(self, in_features, hidden_features, out_features):
-        super().__init__()
-
-        self.fc_in = nn.Sequential(
-            linear(in_features, hidden_features), nn.ReLU(),
-            linear(hidden_features, hidden_features), nn.ReLU(),
-        )
-        
-        self.lstm = nn.LSTM(hidden_features, hidden_features)
-        
-        self.fc_out = nn.Sequential(
-            nn.ReLU(),
-            linear(hidden_features, hidden_features), nn.ReLU(),
-            linear(hidden_features, out_features), 
-            nn.LogSoftmax(dim=1)
-        )
-
-    def forward(self, x, hc=None):
-        # x (seq_len, batch, in_features)
-        seq_len, batch, _ = x.size()
-        x = self.fc_in(x.view(seq_len * batch, -1))
-        x, hc = self.lstm(x.view(seq_len, batch, -1), hc)  # (seq_len, batch, hidden_features)
-        x = self.fc_out(x.view(seq_len * batch, -1))  # (seq_len * batch, out_features)
-        x = x.view(seq_len, batch, -1)  # (seq_len, batch, out_features)
-        return x, hc
 
 
 class Player:
@@ -104,15 +77,16 @@ class Player:
         self.policy_play = policy_play
         self.idx = idx
         self.hand = hand
-        
+
         self.memory = None
         self.xbet = None
         self.xact = 0
-        
+
     def __repr__(self):
         return "[{}: {}]".format(self.idx, self.hand)
-    
+
     def bet(self, num_player, who_beggins):
+        # hand + number of player + who beggins  ===>  the bet: 0, 1, ..., 7
         assert self.xbet is None
         x = torch.ones(52 + 6 + 7).neg()
         for i in self.hand:
@@ -122,8 +96,9 @@ class Player:
         x = self.policy_bet(x.view(1, -1))[0]
         self.xbet = x.max()
         return x.argmax().item()
-        
+
     def play(self, table, bets, num_hands):
+        # hand + table + bets (yours and others) + number of won hands (yours and others)  ===>  the played card
         assert len(bets) == len(num_hands)
         x = torch.ones(52 + 52 * 6 + 8 * (1 + 6) + 8 * (1 + 6)).neg()
         for i in self.hand:
@@ -141,17 +116,17 @@ class Player:
             if i < len(num_hands):
                 x[r + num_hands[(self.idx + i) % len(num_hands)]] = 1
             r += 8
-        
+
         x = x.view(1, 1, -1)
         x, self.memory = self.policy_play(x, self.memory)
         x = x[0, 0]
-        
+
         # x = x - torch.rand(52)  # add randomness to explore more
 
         am = torch.zeros(52)
         am[allowed_moves(table, self.hand)] = 1 - x.min().item()
         x = x + am
-        
+
         self.xact += x.max()
         c = x.argmax().item()
         self.hand.remove(c)
@@ -182,11 +157,45 @@ def play_and_train(p_bet, p_play, optim, np, nc):
     optim.zero_grad()
     loss.backward()
     optim.step()
-    
+
     return avg
 
 
+class PlayPolicy(nn.Module):
+    def __init__(self, in_features, hidden_features, out_features):
+        super().__init__()
+
+        self.fc_in = nn.Sequential(
+            linear(in_features, hidden_features), nn.ReLU(),
+            linear(hidden_features, hidden_features), nn.ReLU(),
+        )
+
+        self.lstm = nn.LSTM(hidden_features, hidden_features)
+
+        self.fc_out = nn.Sequential(
+            nn.ReLU(),
+            linear(hidden_features, hidden_features), nn.ReLU(),
+            linear(hidden_features, out_features),
+            nn.LogSoftmax(dim=1)
+        )
+
+    def forward(self, x, hc=None):
+        # x (seq_len, batch, in_features)
+        seq_len, batch, _ = x.size()
+        x = self.fc_in(x.view(seq_len * batch, -1))
+        x, hc = self.lstm(x.view(seq_len, batch, -1), hc)  # (seq_len, batch, hidden_features)
+        x = self.fc_out(x.view(seq_len * batch, -1))  # (seq_len * batch, out_features)
+        x = x.view(seq_len, batch, -1)  # (seq_len, batch, out_features)
+        return x, hc
+
+
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--log_dir", type=str, required=True)
+    args = parser.parse_args()
+    os.mkdir(args.log_dir)
+    shutil.copyfile(__file__, os.path.join(args.log_dir, "script.py"))
+
     # hand + number of player + who beggins  ===>  the bet: 0, 1, ..., 7
     p_bet = nn.Sequential(linear(52 + 6 + 7, 8), nn.LogSoftmax(dim=1))
 
@@ -202,9 +211,9 @@ def main():
         avg = play_and_train(p_bet, p_play, optim, np, nc)
         avgs.append(avg)
         print("{} {:.1f}   ".format(i, avg), end="\r")
-        
+
         if i % 1000 == 0:
-            torch.save((p_bet.state_dict(), p_play.state_dict(), avgs), "save.pkl")
+            torch.save((p_bet.state_dict(), p_play.state_dict(), avgs), os.path.join(args.log_dir, "save.pkl"))
 
 
 if __name__ == "__main__":
