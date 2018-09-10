@@ -6,6 +6,7 @@ import itertools
 import argparse
 import os
 import shutil
+import time_logging
 
 
 def allowed_moves(table, hand):
@@ -72,14 +73,15 @@ def linear(in_features, out_features, bias=True):
 
 
 class Player:
-    def __init__(self, policy_bet, policy_play, hand, idx):
+    def __init__(self, policy_bet, policy_play, hand, idx, device):
         self.policy_bet = policy_bet
         self.policy_play = policy_play
-        self.idx = idx
         self.hand = hand
+        self.idx = idx
+        self.device = device
 
         self.memory = None
-        self.xbet = None
+        self.xbets = None
         self.xact = 0
 
     def __repr__(self):
@@ -87,20 +89,20 @@ class Player:
 
     def bet(self, num_player, who_beggins):
         # hand + number of player + who beggins  ===>  the bet: 0, 1, ..., 7
-        assert self.xbet is None
-        x = torch.ones(52 + 6 + 7).neg()
+        assert self.xbets is None
+        x = torch.ones(52 + 6 + 7, device=self.device).neg()
         for i in self.hand:
             x[i] = 1
         x[52 + num_player - 2] = 1  # from 2 to 7
         x[52 + 6 + (who_beggins - self.idx) % num_player] = 1  # relative to the player
         x = self.policy_bet(x.view(1, -1))[0]
-        self.xbet = x.max()
+        self.xbets = x
         return x.argmax().item()
 
     def play(self, table, bets, num_hands):
         # hand + table + bets (yours and others) + number of won hands (yours and others)  ===>  the played card
         assert len(bets) == len(num_hands)
-        x = torch.ones(52 + 52 * 6 + 8 * (1 + 6) + 8 * (1 + 6)).neg()
+        x = torch.ones(52 + 52 * 6 + 8 * (1 + 6) + 8 * (1 + 6), device=self.device).neg()
         for i in self.hand:
             x[i] = 1
         r = 52
@@ -121,22 +123,23 @@ class Player:
         x, self.memory = self.policy_play(x, self.memory)
         x = x[0, 0]
 
-        # x = x - torch.rand(52)  # add randomness to explore more
-
-        am = torch.zeros(52)
+        am = x.new_zeros(52)
         am[allowed_moves(table, self.hand)] = 1 - x.min().item()
         x = x + am
 
         self.xact += x.max()
         c = x.argmax().item()
+        if c not in self.hand:
+            print("{} in {} in {}".format(c, allowed_moves(table, self.hand), self.hand))
         self.hand.remove(c)
         return c
 
 
-def play_and_train(p_bet, p_play, optim, np, nc):
+def play_and_train(p_bet, p_play, optim, np, nc, device):
+    t = time_logging.start()
     cards = list(range(52))
     random.shuffle(cards)
-    players = [Player(p_bet, p_play, cards[i * nc: (i + 1) * nc], i) for i in range(np)]
+    players = [Player(p_bet, p_play, cards[i * nc: (i + 1) * nc], i, device) for i in range(np)]
 
     beg = 0
     bets = [p.bet(np, beg) for p in players]
@@ -153,15 +156,18 @@ def play_and_train(p_bet, p_play, optim, np, nc):
     points = [-abs(b - h) if b != h else 10 + b for b, h in zip(bets, nhands)]
     avg = sum(points) / np
 
-    loss = -sum((r - avg) * (p.xbet + p.xact / nc) for r, p in zip(points, players)) / np
+    t = time_logging.end("play", t)
+
+    loss = -sum((r - avg) * p.xact / nc + p.xbets[h] for r, p, h in zip(points, players, nhands)) / np
     optim.zero_grad()
     loss.backward()
     optim.step()
 
+    t = time_logging.end("backward", t)
     return avg
 
 
-class PlayPolicy(nn.Module):
+class LSTMPolicy(nn.Module):
     def __init__(self, in_features, hidden_features, out_features):
         super().__init__()
 
@@ -215,61 +221,48 @@ class GRUPolicy(nn.Module):
         return x, h
 
 
-class GRUDeepPolicy(nn.Module):
-    def __init__(self, in_features, hidden_features, out_features):
-        super().__init__()
-
-        self.fc_in = nn.Sequential(
-            linear(in_features, (in_features + hidden_features) // 2), nn.ReLU(),
-            linear((in_features + hidden_features) // 2, hidden_features), nn.ReLU(),
-            linear(hidden_features, hidden_features), nn.ReLU(),
-        )
-
-        self.gru = nn.GRU(hidden_features, hidden_features)
-
-        self.fc_out = nn.Sequential(
-            nn.ReLU(),
-            linear(hidden_features, hidden_features), nn.ReLU(),
-            linear(hidden_features, hidden_features), nn.ReLU(),
-            linear(hidden_features, out_features),
-            nn.LogSoftmax(dim=1)
-        )
-
-    def forward(self, x, h=None):
-        # x (seq_len, batch, in_features)
-        seq_len, batch, _ = x.size()
-        x = self.fc_in(x.view(seq_len * batch, -1))
-        x, h = self.gru(x.view(seq_len, batch, -1), h)  # (seq_len, batch, hidden_features)
-        x = self.fc_out(x.view(seq_len * batch, -1))  # (seq_len * batch, out_features)
-        x = x.view(seq_len, batch, -1)  # (seq_len, batch, out_features)
-        return x, h
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--log_dir", type=str, required=True)
+    parser.add_argument("--restore", type=str)
     args = parser.parse_args()
+    
+    torch.backends.cudnn.benchmark = True
+    device = torch.device('cuda:0')
     os.mkdir(args.log_dir)
     shutil.copyfile(__file__, os.path.join(args.log_dir, "script.py"))
 
     # hand + number of player + who beggins  ===>  the bet: 0, 1, ..., 7
-    p_bet = nn.Sequential(linear(52 + 6 + 7, 8), nn.LogSoftmax(dim=1))
+    p_bet = nn.Sequential(linear(52 + 6 + 7, 7), nn.ConstantPad1d((1, 0), 0), nn.LogSoftmax(dim=1)).to(device)
 
     # hand + table + bets (yours and others) + number of won hands (yours and others)  ===>  the played card
-    p_play = GRUDeepPolicy(52 + 52 * 6 + 8 * (1 + 6) + 8 * (1 + 6), 64, 52)
+    p_play = LSTMPolicy(52 + 52 * 6 + 8 * (1 + 6) + 8 * (1 + 6), 256, 52).to(device)
+
+    if args.restore:
+        bet, play, avgs = torch.load(args.restore, map_location=device)
+        try:
+            p_bet.load_state_dict(bet)
+        except RuntimeError:
+            pass
+        p_play.load_state_dict(play)
+    else:
+        avgs = []
 
     optim = torch.optim.Adam(list(p_bet.parameters()) + list(p_play.parameters()))
 
-    avgs = []
     for i in itertools.count():
         np = random.randint(2, 7)  # number of players
         nc = random.randint(1, 7)  # number of cards
-        avg = play_and_train(p_bet, p_play, optim, np, nc)
+        t = time_logging.start()
+        avg = play_and_train(p_bet, p_play, optim, np, nc, device)
+        time_logging.end("play & train", t)
         avgs.append(avg)
-        print("{} {:.1f}   ".format(i, avg), end="\r")
+        print("{} {:.1f}   ".format(i, sum(avgs[-200:]) / len(avgs[-200:])), end="\r")
 
         if i % 1000 == 0:
             torch.save((p_bet.state_dict(), p_play.state_dict(), avgs), os.path.join(args.log_dir, "save.pkl"))
+
+            print(time_logging.text_statistics())
 
 
 if __name__ == "__main__":

@@ -1,2 +1,4 @@
 *.ipynb
 *.pkl
+script.py
+__pycache__
