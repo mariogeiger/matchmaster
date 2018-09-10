@@ -215,6 +215,36 @@ class GRUPolicy(nn.Module):
         return x, h
 
 
+class GRUDeepPolicy(nn.Module):
+    def __init__(self, in_features, hidden_features, out_features):
+        super().__init__()
+
+        self.fc_in = nn.Sequential(
+            linear(in_features, (in_features + hidden_features) // 2), nn.ReLU(),
+            linear((in_features + hidden_features) // 2, hidden_features), nn.ReLU(),
+            linear(hidden_features, hidden_features), nn.ReLU(),
+        )
+
+        self.gru = nn.GRU(hidden_features, hidden_features)
+
+        self.fc_out = nn.Sequential(
+            nn.ReLU(),
+            linear(hidden_features, hidden_features), nn.ReLU(),
+            linear(hidden_features, hidden_features), nn.ReLU(),
+            linear(hidden_features, out_features),
+            nn.LogSoftmax(dim=1)
+        )
+
+    def forward(self, x, h=None):
+        # x (seq_len, batch, in_features)
+        seq_len, batch, _ = x.size()
+        x = self.fc_in(x.view(seq_len * batch, -1))
+        x, h = self.gru(x.view(seq_len, batch, -1), h)  # (seq_len, batch, hidden_features)
+        x = self.fc_out(x.view(seq_len * batch, -1))  # (seq_len * batch, out_features)
+        x = x.view(seq_len, batch, -1)  # (seq_len, batch, out_features)
+        return x, h
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--log_dir", type=str, required=True)
@@ -226,7 +256,7 @@ def main():
     p_bet = nn.Sequential(linear(52 + 6 + 7, 8), nn.LogSoftmax(dim=1))
 
     # hand + table + bets (yours and others) + number of won hands (yours and others)  ===>  the played card
-    p_play = GRUPolicy(52 + 52 * 6 + 8 * (1 + 6) + 8 * (1 + 6), 512, 52)
+    p_play = GRUDeepPolicy(52 + 52 * 6 + 8 * (1 + 6) + 8 * (1 + 6), 64, 52)
 
     optim = torch.optim.Adam(list(p_bet.parameters()) + list(p_play.parameters()))
 
