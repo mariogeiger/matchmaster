@@ -257,7 +257,12 @@ def main():
 
     policy = (
         # Bet policy
-        nn.Sequential(linear(65, 7), nn.ConstantPad1d((1, 0), 0), nn.LogSoftmax(dim=1)).to(device),
+        nn.Sequential(
+            linear(65, 128), nn.ReLU(),
+            linear(128, 128), nn.ReLU(), 
+            linear(128, 128), nn.ReLU(), 
+            linear(128, 7), nn.ConstantPad1d((1, 0), 0), nn.LogSoftmax(dim=1)
+        ).to(device),
         # Play policy
         LSTMPolicy(476, 256, 52).to(device)
     )
