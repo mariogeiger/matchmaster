@@ -1,3 +1,11 @@
+'''
+Reinforcement learning for the game MatchMaster
+
+52 cards, 13 x 4 colors
+encoded with int from 0 to 51
+0 to 12 are the trumps (0 weaker 12 stronger)
+13 to 25, 26 to 38 and 39 to 51 are the 3 other colors
+'''
 # pylint: disable=C,E1101,W0221
 import torch
 import torch.nn as nn
@@ -8,8 +16,11 @@ import os
 import shutil
 import time_logging
 
-
 def allowed_moves(table, hand):
+    '''
+    Given the cards in hand and the one lying on the table
+    returns the allowed card to play
+    '''
     if len(table) == 0:
         return hand
 
@@ -33,6 +44,9 @@ def allowed_moves(table, hand):
 
 
 def winner(table):
+    '''
+    Given the card on the table, returns the index of the winning card
+    '''
     c = table[0]
     w = 0
     for i in range(1, len(table)):
@@ -43,6 +57,9 @@ def winner(table):
 
 
 def orthogonal_(tensor, gain=1):
+    '''
+    Orthogonal initialization (modified version from PyTorch)
+    '''
     if tensor.ndimension() < 2:
         raise ValueError("Only tensors with 2 or more dimensions are supported")
 
@@ -66,6 +83,9 @@ def orthogonal_(tensor, gain=1):
 
 
 def linear(in_features, out_features, bias=True):
+    '''
+    Linear Module initialized properly
+    '''
     m = nn.Linear(in_features, out_features, bias=bias)
     orthogonal_(m.weight)
     nn.init.zeros_(m.bias)
@@ -73,6 +93,9 @@ def linear(in_features, out_features, bias=True):
 
 
 class Player:
+    '''
+    A player with its hand of cards and its memory for the LSTM
+    '''
     def __init__(self, policy_bet, policy_play, hand, idx, device):
         self.policy_bet = policy_bet
         self.policy_play = policy_play
@@ -226,41 +249,42 @@ def main():
     parser.add_argument("--log_dir", type=str, required=True)
     parser.add_argument("--restore", type=str)
     args = parser.parse_args()
-    
+
     torch.backends.cudnn.benchmark = True
-    device = torch.device('cuda:0')
+    device = torch.device('cuda:0' if torch.cuda.is_available() else "cpu")
     os.mkdir(args.log_dir)
     shutil.copyfile(__file__, os.path.join(args.log_dir, "script.py"))
 
-    # hand + number of player + who beggins  ===>  the bet: 0, 1, ..., 7
-    p_bet = nn.Sequential(linear(52 + 6 + 7, 7), nn.ConstantPad1d((1, 0), 0), nn.LogSoftmax(dim=1)).to(device)
-
-    # hand + table + bets (yours and others) + number of won hands (yours and others)  ===>  the played card
-    p_play = LSTMPolicy(52 + 52 * 6 + 8 * (1 + 6) + 8 * (1 + 6), 256, 52).to(device)
+    policy = (
+        # Bet policy
+        nn.Sequential(linear(65, 7), nn.ConstantPad1d((1, 0), 0), nn.LogSoftmax(dim=1)).to(device),
+        # Play policy
+        LSTMPolicy(476, 256, 52).to(device)
+    )
 
     if args.restore:
         bet, play, avgs = torch.load(args.restore, map_location=device)
         try:
-            p_bet.load_state_dict(bet)
+            policy[0].load_state_dict(bet)
         except RuntimeError:
             pass
-        p_play.load_state_dict(play)
+        policy[1].load_state_dict(play)
     else:
         avgs = []
 
-    optim = torch.optim.Adam(list(p_bet.parameters()) + list(p_play.parameters()))
+    optim = torch.optim.Adam(list(policy[0].parameters()) + list(policy[1].parameters()))
 
-    for i in itertools.count():
+    for i in itertools.count(1):
         np = random.randint(2, 7)  # number of players
         nc = random.randint(1, 7)  # number of cards
         t = time_logging.start()
-        avg = play_and_train(p_bet, p_play, optim, np, nc, device)
+        avg = play_and_train(*policy, optim, np, nc, device)
         time_logging.end("play & train", t)
         avgs.append(avg)
         print("{} {:.1f}   ".format(i, sum(avgs[-200:]) / len(avgs[-200:])), end="\r")
 
         if i % 1000 == 0:
-            torch.save((p_bet.state_dict(), p_play.state_dict(), avgs), os.path.join(args.log_dir, "save.pkl"))
+            torch.save((policy[0].state_dict(), policy[1].state_dict(), avgs), os.path.join(args.log_dir, "save.pkl"))
 
             print(time_logging.text_statistics())
 
