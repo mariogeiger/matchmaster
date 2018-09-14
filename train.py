@@ -259,8 +259,8 @@ def main():
         # Bet policy
         nn.Sequential(
             linear(65, 128), nn.ReLU(),
-            linear(128, 128), nn.ReLU(), 
-            linear(128, 128), nn.ReLU(), 
+            linear(128, 128), nn.ReLU(),
+            linear(128, 128), nn.ReLU(),
             linear(128, 7), nn.ConstantPad1d((1, 0), 0), nn.LogSoftmax(dim=1)
         ).to(device),
         # Play policy
@@ -271,13 +271,18 @@ def main():
         bet, play, avgs = torch.load(args.restore, map_location=device)
         try:
             policy[0].load_state_dict(bet)
+            print("restored bet policy")
         except RuntimeError:
             pass
-        policy[1].load_state_dict(play)
+        try:
+            policy[1].load_state_dict(play)
+            print("restored game policy")
+        except RuntimeError:
+            pass
     else:
         avgs = []
 
-    optim = torch.optim.Adam(list(policy[0].parameters()) + list(policy[1].parameters()))
+    optim = torch.optim.Adam(list(policy[0].parameters()) + list(policy[1].parameters()), lr=1e-4)
 
     for i in itertools.count(1):
         np = random.randint(2, 7)  # number of players
