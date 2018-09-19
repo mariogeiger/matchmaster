@@ -26,6 +26,10 @@ def allowed_moves(table, hand):
 
     same_color = [x for x in hand if x // 13 == table[0] // 13]
     if len(same_color) > 0:
+        if table[0] < 13:
+            better_trumps = [x for x in same_color if x > table[0]]
+            if len(better_trumps) > 0:
+                return better_trumps
         return same_color
 
     trumps = [x for x in hand if x // 13 == 0]
